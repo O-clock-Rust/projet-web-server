@@ -15,7 +15,7 @@ pub fn tasks_config(cfg: &mut web::ServiceConfig) {
                     web::resource("")
                         .route(web::get().to(get_task_detail))
                         .route(web::put().to(edit_task))
-                        .route(web::get().to(remove_task)),
+                        .route(web::delete().to(remove_task)),
                 ),
             ),
     );

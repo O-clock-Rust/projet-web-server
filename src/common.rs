@@ -1,12 +1,26 @@
-#[derive(Debug)]
-pub struct Task {
-    pub id: u32,
-    pub title: String,
-    pub description: String,
-    pub status: bool,
+use serde::Serialize;
+
+use crate::models::Task;
+
+pub trait HasId {
+    fn get_id(&self) -> u32;
 }
 
-pub struct AppState {
-    pub app_name: String,
-    pub tasks: Option<Vec<Task>>,
+#[derive(Serialize)]
+pub struct BasicResponse {
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct TasksResponse {
+    pub status: String,
+    pub results: usize,
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SingleTaskResponse {
+    pub status: String,
+    pub task: Task,
 }
