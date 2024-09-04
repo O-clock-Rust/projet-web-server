@@ -1,9 +1,10 @@
-use actix_web::{delete, get, post, put, web, HttpResponse, Responder, Result};
+use actix_web::{delete, get, post, put, web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
+use sqlx::{prelude::FromRow, Pool, Sqlite};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, FromRow)]
 struct Task {
-    id: u32,
+    id: i64,
     title: String,
     description: String,
     status: bool,
@@ -16,62 +17,191 @@ struct AddTask {
     status: bool,
 }
 
-#[post("/tasks")]
-async fn create_task(task: web::Json<AddTask>) -> Result<impl Responder> {
-    let task = Task {
-        id: 1,
-        title: task.title.clone(),
-        description: task.description.clone(),
-        status: task.status,
-    };
+#[derive(Serialize)]
+struct JsonResponse {
+    status: String,
+    message: String,
+}
 
-    Ok(web::Json(task))
+#[post("/tasks")]
+async fn create_task(pool: web::Data<Pool<Sqlite>>, task: web::Json<AddTask>) -> impl Responder {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO tasks (title, description, status) 
+        VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(task.title.clone())
+    .bind(task.description.clone())
+    .bind(task.status)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(insert_result) => {
+            let task_id = insert_result.last_insert_rowid();
+
+            let created_task = Task {
+                id: task_id,
+                title: task.title.clone(),
+                description: task.description.clone(),
+                status: task.status,
+            };
+
+            HttpResponse::Created().json(created_task)
+        },
+        Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("Failed to create the task: {}", e)
+        }),
+    }
 }
 
 #[get("/tasks")]
-async fn get_tasks() -> Result<impl Responder> {
-    let first_task = Task {
-        id: 1,
-        title: "First task".to_string(),
-        description: "This is the first task".to_string(),
-        status: true,
-    };
+async fn get_tasks(pool: web::Data<Pool<Sqlite>>) -> impl Responder {
+    let result = sqlx::query_as::<_, Task>(
+        r#"
+        SELECT id, title, description, status FROM tasks
+        "#,
+    )
+    .fetch_all(pool.get_ref())
+    .await;
 
-    let second_task = Task {
-        id: 2,
-        title: "Second task".to_string(),
-        description: "This is the second task".to_string(),
-        status: true,
-    };
-
-    Ok(web::Json([first_task, second_task]))
+    match result {
+        Ok(tasks) => HttpResponse::Ok().json(tasks),
+        Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("Failed to fetch the tasks: {}", e)
+        })
+    }
 }
 
 #[get("/tasks/{id}")]
-async fn get_task(id: web::Path<u32>) -> Result<impl Responder> {
-    let task = Task {
-        id: 1,
-        title: "First task".to_string(),
-        description: "This is the first task".to_string(),
-        status: true,
-    };
+async fn get_task(pool: web::Data<Pool<Sqlite>>, id: web::Path<i64>) -> impl Responder {
+    let id = id.into_inner();
 
-    Ok(web::Json(task))
+    let result = sqlx::query_as::<_, Task>(
+        r#"
+        SELECT id, title, description, status
+        FROM tasks
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_one(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(task) => HttpResponse::Ok().json(task),
+        Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("Failed to fetch the task with the ID {}: {}", id, e)
+        })
+    }
 }
 
 #[put("/tasks/{id}")]
-async fn edit_task(id: web::Path<u32>, task: web::Json<AddTask>) -> Result<impl Responder> {
-    let task = Task {
-        id: 1,
-        title: task.title.clone(),
-        description: task.description.clone(),
-        status: task.status,
-    };
+async fn edit_task(pool: web::Data<Pool<Sqlite>>, id: web::Path<i64>, task: web::Json<AddTask>) -> impl Responder {
+    let task_id = id.into_inner();
 
-    Ok(web::Json(task))
+    let existing_task = sqlx::query!(
+        "SELECT id FROM tasks WHERE id = ?",
+        task_id
+    )
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    match existing_task {
+        Ok(Some(_)) => {
+            let result = sqlx::query!(
+                r#"
+                UPDATE tasks 
+                SET title = ?, description = ?, status = ? 
+                WHERE id = ?
+                "#,
+                task.title,
+                task.description,
+                task.status,
+                task_id
+            )
+            .execute(pool.get_ref())
+            .await;
+
+            match result {
+                Ok(_) => {
+                    let updated_task = sqlx::query_as!(
+                        Task,
+                        r#"
+                        SELECT id, title, description, status
+                        FROM tasks
+                        WHERE id = ?
+                        "#,
+                        task_id
+                    )
+                    .fetch_one(pool.get_ref())
+                    .await;
+
+                    match updated_task {
+                        Ok(task) => HttpResponse::Ok().json(task),
+                        Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+                            status: "error".to_string(),
+                            message: format!("Failed to fetch the updated task: {}", e)
+                        })
+                    }
+                },
+                Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+                    status: "error".to_string(),
+                    message: format!("Failed to update the task with the ID {}: {}", task_id, e)
+                })
+            }
+        },
+        Ok(None) => HttpResponse::NotFound().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("The task with ID: {} not found", task_id)
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("Failed to fetch the task with the ID {}: {}", task_id, e)
+        })
+    }
 }
 
 #[delete("/tasks/{id}")]
-async fn delete_task(id: web::Path<u32>) -> impl Responder {
-    HttpResponse::Ok()
+async fn delete_task(pool: web::Data<Pool<Sqlite>>, id: web::Path<i64>) -> impl Responder {
+    let task_id = id.into_inner();
+
+    // Vérifier si la tâche existe
+    let existing_task = sqlx::query!(
+        "SELECT id FROM tasks WHERE id = ?",
+        task_id
+    )
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    match existing_task {
+        Ok(Some(_)) => {
+            let result = sqlx::query!(
+                "DELETE FROM tasks WHERE id = ?",
+                task_id
+            )
+            .execute(pool.get_ref())
+            .await;
+
+            match result {
+                Ok(_) => HttpResponse::NoContent().finish(),
+                Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+                    status: "error".to_string(),
+                    message: format!("Failed to delete the task: {}", e)
+                }),
+            }
+        }
+        Ok(None) => HttpResponse::NotFound().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("The task with ID: {} not found", task_id)
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(JsonResponse {
+            status: "error".to_string(),
+            message: format!("Failed to fetch the task with the ID {}: {}", task_id, e)
+        })
+    }
 }
